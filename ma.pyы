@@ -1,0 +1,102 @@
+import requests, os, subprocess, sys, re, json, datetime, time, ast, shutil, glob
+
+# ==========================================================
+# МАРА v6.1 (TRANSPARENCY UPGRADE: ВИДИМАЯ ЛОГИКА)
+# ==========================================================
+BASE_URL = "http://localhost:11434/api/generate"
+MODEL = "qwen2.5-coder:1.5b"
+WORK_DIR = os.getcwd()
+BACKUP_DIR = os.path.join(WORK_DIR, "_mara_backups")
+
+if not os.path.exists(BACKUP_DIR): os.makedirs(BACKUP_DIR)
+if sys.platform == "win32": os.system('chcp 65001 > nul')
+
+def create_backup():
+    try:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        b_path = os.path.join(BACKUP_DIR, f"backup_{ts}.py")
+        shutil.copy2(__file__, b_path)
+        files = sorted(glob.glob(os.path.join(BACKUP_DIR, "backup_*.py")), key=os.path.getmtime)
+        for old_file in files[:-3]: os.remove(old_file)
+        return True
+    except: return False
+
+def extract_pure_code(text):
+    blocks = re.findall(r'```(?:python)?\s*(.*?)\s*```', text, re.DOTALL | re.IGNORECASE)
+    if blocks:
+        return max(blocks, key=len).strip()
+    code_lines = []
+    keywords = ('import', 'from', 'def', 'class', 'if', 'for', 'while', 'with', 'print', 'try', 'except')
+    for line in text.split('\n'):
+        if line.strip().startswith(keywords) or '=' in line or (line.startswith(('    ', '\t')) and code_lines):
+            if not re.search(r'[а-яА-ЯёЁ]{5,}', line):
+                code_lines.append(line)
+    return '\n'.join(code_lines).strip()
+
+def ask_ollama(prompt, is_healing=False):
+    system_instruction = (
+        "You are MARA v6.1. Generate ONLY executable Python code. No chat. Use UTF-8."
+    )
+    if is_healing:
+        system_instruction += " FIX the SyntaxError. Return ONLY corrected code."
+    payload = {
+        "model": MODEL,
+        "prompt": f"{system_instruction}\nTask: {prompt}\nCode:",
+        "stream": False,
+        "options": {"temperature": 0.1}
+    }
+    try:
+        r = requests.post(BASE_URL, json=payload, timeout=90)
+        return extract_pure_code(r.json().get('response', ''))
+    except Exception as e: return f"print('API Error: {e}')"
+
+def execute_code(code):
+    if not code: return "", "Модель не выдала код."
+    try:
+        ast.parse(code)
+    except SyntaxError as e: return "", f"SyntaxError: {e}"
+    temp_file = os.path.join(WORK_DIR, "_run.py")
+    header = "# -*- coding: utf-8 -*-\nimport sys, os, datetime, time\n"
+    if sys.platform == "win32":
+        header += "if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8')\n"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f: f.write(header + code)
+        env = os.environ.copy(); env["PYTHONIOENCODING"] = "utf-8"
+        res = subprocess.run([sys.executable, temp_file], capture_output=True, timeout=30, env=env, text=True, encoding='utf-8', errors='replace')
+        return res.stdout, res.stderr
+    except Exception as e: return "", str(e)
+
+if __name__ == "__main__":
+    print("="*45 + "\nМАРА v6.1 (TRANSPARENT ENGINE) - ГОТОВА\n" + "="*45)
+    create_backup()
+    last_error, last_prompt = "", ""
+
+    while True:
+        try:
+            cmd = input("\nМАРА >>> ").strip()
+            if not cmd: continue
+            if cmd.lower() in ['exit', 'выход']: break
+            
+            if cmd.lower() == 'heal' and last_error:
+                print("[СИСТЕМА]: Пытаюсь вылечить...")
+                code = ask_ollama(f"Исправь {last_error} для: {last_prompt}", is_healing=True)
+            else:
+                last_prompt = cmd
+                print("МАРА: Обдумываю алгоритм...")
+                code = ask_ollama(cmd)
+            
+            if code:
+                print("\n" + "—"*20 + " ЛОГИКА (КОД) " + "—"*20)
+                print(code)
+                print("—"*54 + "\n")
+
+            stdout, stderr = execute_code(code)
+            if stdout: print(f"[РЕЗУЛЬТАТ]:\n{stdout}")
+            if stderr:
+                print(f"[ОШИБКА]:\n{stderr}")
+                last_error = stderr
+                print("\n" + "!"*35 + "\nВведите 'heal' для исправления\n" + "!"*35)
+            elif code:
+                print("[УСПЕХ]: Задача выполнена.")
+        except KeyboardInterrupt: break
+        except Exception as e: print(f"Критический сбой: {e}")
